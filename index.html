@@ -34,7 +34,7 @@
 <p><strong>Privacy:</strong> passwords are handled by Firebase Authentication, not stored in the app's user profile. This form uses mobile number as the login ID; it does not verify phone ownership by SMS.</p>
 </section>
 <div id="accountBar" hidden style="display:none;align-items:center;gap:8px;justify-content:flex-end;margin-bottom:12px"><span id="signedInAs" style="font-size:12px;color:var(--muted)"></span><button id="adminToggle" class="small-action" hidden>ADMIN</button><button id="logoutBtn" class="small-action">LOG OUT</button></div>
-<section id="adminPanel"><h3>Admin Dashboard</h3><p>Registered accounts and saved progress. Keep the Admin UID private.</p><button id="refreshUsers" class="secondary" type="button">REFRESH USERS</button><div id="adminUsers" style="margin-top:10px">No users loaded.</div></section>
+<section id="adminPanel"><h3>Admin Dashboard</h3><p>Registered accounts, online activity, login history and saved progress. Keep the Admin UID private.</p><button id="refreshUsers" class="secondary" type="button">REFRESH DASHBOARD</button><div class="admin-user" id="adminStats" style="margin-top:10px">Stats will appear here.</div><h4>Registered Users &amp; Online Status</h4><div id="adminUsers">No users loaded.</div><h4>Recent Login / Logout History</h4><div id="adminHistory">History will appear here.</div></section>
 <div id="appContent" hidden>
 <main>
 <section class="screen active" id="home"><div class="hero"><div class="eyebrow">Learn · Practice · Level Up</div><h2>Japanese Learning<br><span class="neon">Famn</span></h2><p>Master Hiragana one page at a time.<br>Ready to begin your learning quest?</p><button class="primary full" id="startBtn">▶ START</button></div></section>
@@ -70,6 +70,32 @@ const firebaseConfig = {
 };
 const adminUid = "VHwHp1zBeWfBXgkOUwBhyyJkmAx2";
 let firebaseReady=false, isLoginMode=false, cloudSaveTimer=null, cloudSaveBusy=false, cloudLoadDone=false;
+let heartbeatTimer=null, presenceUid=null;
+const HEARTBEAT_MS=30000, ONLINE_WINDOW_MS=90000;
+function safeName(user){return (user&&(user.displayName||'Player'))||'Player';}
+async function recordAuthEvent(eventName,user){
+  if(!firebaseReady||!user)return;
+  try{await firebase.firestore().collection('loginHistory').add({userId:user.uid,userName:safeName(user),event:eventName,timestamp:firebase.firestore.FieldValue.serverTimestamp()});}
+  catch(e){console.warn('Could not record '+eventName+' event. Check Firestore rules.',e);}
+}
+async function heartbeat(user){
+  if(!firebaseReady||!user)return;
+  try{await firebase.firestore().collection('users').doc(user.uid).set({isOnline:true,lastSeen:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});}
+  catch(e){console.warn('Online heartbeat failed. Check Firestore rules.',e);}
+}
+function startHeartbeat(user){
+  if(heartbeatTimer)clearInterval(heartbeatTimer);
+  presenceUid=user.uid;
+  heartbeat(user);
+  heartbeatTimer=setInterval(()=>{const currentUser=firebaseReady&&firebase.auth().currentUser;if(currentUser&&currentUser.uid===presenceUid)heartbeat(currentUser);},HEARTBEAT_MS);
+}
+async function stopHeartbeat(user){
+  if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}
+  presenceUid=null;
+  if(!firebaseReady||!user)return;
+  try{await firebase.firestore().collection('users').doc(user.uid).set({isOnline:false,lastSeen:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});}
+  catch(e){console.warn('Could not update offline status; stale heartbeat will expire.',e);}
+}
 const authGate=document.getElementById('authGate'), appContent=document.getElementById('appContent'), accountBar=document.getElementById('accountBar');
 function firebaseConfigured(){return firebaseConfig.apiKey && !firebaseConfig.apiKey.startsWith('PASTE_') && firebaseConfig.projectId && !firebaseConfig.projectId.startsWith('PASTE_') && firebaseConfig.appId && !firebaseConfig.appId.startsWith('PASTE_');}
 function setAuthMessage(msg,good=false){const el=document.getElementById('authMessage');el.textContent=msg;el.className='auth-msg'+(good?' good':'');}
@@ -80,7 +106,7 @@ function showSignedIn(user,profile){authGate.hidden=true;authGate.style.display=
 function getProgressSnapshot(){return {name:(firebase.auth().currentUser&&firebase.auth().currentUser.displayName)||'',completedLevels,activeLevel,page,attempts,kanaIndex,kanaAttempts,premiumUnlocked:false,updatedAt:firebase.firestore.FieldValue.serverTimestamp()};}
 async function saveProgress(){if(!firebaseReady||!firebase.auth().currentUser||cloudSaveBusy)return;cloudSaveBusy=true;try{const user=firebase.auth().currentUser;await firebase.firestore().collection('users').doc(user.uid).set({progress:getProgressSnapshot(),updatedAt:firebase.firestore.FieldValue.serverTimestamp()},{merge:true});}catch(e){console.warn('Cloud save failed',e);const st=document.getElementById('status');if(st)st.textContent='Cloud save pending: check internet or Firebase rules.';}finally{cloudSaveBusy=false;}}
 async function loadProgress(user){try{const snap=await firebase.firestore().collection('users').doc(user.uid).get();const data=snap.exists?snap.data():{};const pr=data.progress||{};if(Array.isArray(pr.completedLevels))completedLevels=pr.completedLevels.filter(n=>Number.isInteger(n)&&n>=1&&n<=10);if(Number.isInteger(pr.activeLevel)&&pr.activeLevel>=1&&pr.activeLevel<=10)activeLevel=pr.activeLevel;if(Number.isInteger(pr.page)&&pr.page>=0&&pr.page<=9)page=pr.page;if(Number.isInteger(pr.attempts)&&pr.attempts>=0)attempts=pr.attempts;if(Number.isInteger(pr.kanaIndex)&&pr.kanaIndex>=0)kanaIndex=pr.kanaIndex;if(Number.isInteger(pr.kanaAttempts)&&pr.kanaAttempts>=0&&pr.kanaAttempts<=10)kanaAttempts=pr.kanaAttempts;premiumUnlocked=false;renderBeginnerLevels();renderDrawingLevels();renderPage();if(current==='home')show('home');cloudLoadDone=true;}catch(e){console.error(e);setAuthMessage('Signed in, but progress could not be loaded. Check Firestore rules.');}}
-async function submitAuth(){if(!firebaseReady){setAuthMessage('Online login is not active yet. The app owner must connect Firebase first.');return;}const btn=document.getElementById('authSubmit');btn.disabled=true;try{let phone,name,password;if(isLoginMode){phone=normalizePhone(document.getElementById('loginPhone').value);password=document.getElementById('loginPassword').value;}else{name=document.getElementById('regName').value.trim();phone=normalizePhone(document.getElementById('regPhone').value);password=document.getElementById('regPassword').value;if(name.length<2)throw new Error('Enter your name (at least 2 characters).');}if(!/^\d{10}$/.test(phone))throw new Error('Enter a valid 10-digit Indian mobile number.');if(!password||password.length<8)throw new Error('Password must be at least 8 characters.');const email=phoneLoginId(phone);let credential;if(isLoginMode){credential=await firebase.auth().signInWithEmailAndPassword(email,password);}else{credential=await firebase.auth().createUserWithEmailAndPassword(email,password);await credential.user.updateProfile({displayName:name});await firebase.firestore().collection('users').doc(credential.user.uid).set({name,mobile:phone,createdAt:firebase.firestore.FieldValue.serverTimestamp(),progress:{completedLevels:[],activeLevel:1,page:0,attempts:0,kanaIndex:0,kanaAttempts:0,premiumUnlocked:false}}); }setAuthMessage('Account ready. Loading your progress…',true);}catch(e){let msg=e.message||'Could not sign in.';if(e.code==='auth/email-already-in-use')msg='This mobile number already has an account. Choose login.';if(e.code==='auth/invalid-credential'||e.code==='auth/wrong-password'||e.code==='auth/user-not-found')msg='Mobile number or password is incorrect.';setAuthMessage(msg);}finally{btn.disabled=false;}}
+async function submitAuth(){if(!firebaseReady){setAuthMessage('Online login is not active yet. The app owner must connect Firebase first.');return;}const btn=document.getElementById('authSubmit');btn.disabled=true;try{let phone,name,password;if(isLoginMode){phone=normalizePhone(document.getElementById('loginPhone').value);password=document.getElementById('loginPassword').value;}else{name=document.getElementById('regName').value.trim();phone=normalizePhone(document.getElementById('regPhone').value);password=document.getElementById('regPassword').value;if(name.length<2)throw new Error('Enter your name (at least 2 characters).');}if(!/^\d{10}$/.test(phone))throw new Error('Enter a valid 10-digit Indian mobile number.');if(!password||password.length<8)throw new Error('Password must be at least 8 characters.');const email=phoneLoginId(phone);let credential;if(isLoginMode){credential=await firebase.auth().signInWithEmailAndPassword(email,password);}else{credential=await firebase.auth().createUserWithEmailAndPassword(email,password);await credential.user.updateProfile({displayName:name});await firebase.firestore().collection('users').doc(credential.user.uid).set({name,mobile:phone,createdAt:firebase.firestore.FieldValue.serverTimestamp(),progress:{completedLevels:[],activeLevel:1,page:0,attempts:0,kanaIndex:0,kanaAttempts:0,premiumUnlocked:false}}); }await recordAuthEvent('login',credential.user);setAuthMessage('Account ready. Loading your progress…',true);}catch(e){let msg=e.message||'Could not sign in.';if(e.code==='auth/email-already-in-use')msg='This mobile number already has an account. Choose login.';if(e.code==='auth/invalid-credential'||e.code==='auth/wrong-password'||e.code==='auth/user-not-found')msg='Mobile number or password is incorrect.';setAuthMessage(msg);}finally{btn.disabled=false;}}
 document.getElementById('authSubmit').addEventListener('click',submitAuth);
 document.getElementById('authSwitch').addEventListener('click',()=>{isLoginMode=!isLoginMode;document.getElementById('registerFields').hidden=isLoginMode;document.getElementById('loginFields').hidden=!isLoginMode;document.getElementById('authSubmit').textContent=isLoginMode?'LOGIN':'CREATE ACCOUNT';document.getElementById('authSwitch').textContent=isLoginMode?'CREATE NEW ACCOUNT':'I HAVE AN ACCOUNT';setAuthMessage('');});
 document.getElementById('logoutBtn').addEventListener('click',async()=>{
@@ -92,13 +118,44 @@ document.getElementById('logoutBtn').addEventListener('click',async()=>{
   if(premiumMessage){premiumMessage.textContent='';premiumMessage.className='premium-message';}
   renderBeginnerLevels();
   renderDrawingLevels();
+  const user=firebase.auth().currentUser;
+  if(user){await recordAuthEvent('logout',user);await stopHeartbeat(user);}
   await saveProgress();
   await firebase.auth().signOut();
 });
 document.getElementById('adminToggle').addEventListener('click',()=>{const p=document.getElementById('adminPanel');p.style.display=p.style.display==='block'?'none':'block';if(p.style.display==='block')loadAdminUsers();});
 document.getElementById('refreshUsers').addEventListener('click',loadAdminUsers);
-async function loadAdminUsers(){const box=document.getElementById('adminUsers');box.textContent='Loading…';const user=firebase.auth().currentUser;if(!user||user.uid!==adminUid){box.textContent='Admin access required.';return;}try{const snap=await firebase.firestore().collection('users').orderBy('createdAt','desc').limit(200).get();if(snap.empty){box.textContent='No registered users yet.';return;}box.innerHTML='';snap.forEach(doc=>{const d=doc.data(),pr=d.progress||{},el=document.createElement('div');el.className='admin-user';el.textContent=(d.name||'Unnamed')+' · Mobile: '+(d.mobile||'not saved')+' · Levels completed: '+(pr.completedLevels||[]).length+'/10';box.appendChild(el);});}catch(e){box.textContent='Could not load users. Check admin UID and Firestore security rules.';}}
-if(firebaseConfigured()){try{firebase.initializeApp(firebaseConfig);firebaseReady=true;firebase.auth().onAuthStateChanged(async user=>{if(!user){premiumUnlocked=false;showSignedOut();return;}let profile={name:user.displayName||'Player'};try{const doc=await firebase.firestore().collection('users').doc(user.uid).get();if(doc.exists)profile={...profile,...doc.data()};}catch(e){console.warn(e);}showSignedIn(user,profile);await loadProgress(user);if(user.uid===adminUid&&!adminUid.startsWith('PASTE_'))loadAdminUsers();if(cloudSaveTimer)clearInterval(cloudSaveTimer);cloudSaveTimer=setInterval(saveProgress,8000);});}catch(e){firebaseReady=false;document.getElementById('setupWarning').hidden=false;showSignedOut();}}else{document.getElementById('setupWarning').hidden=false;showSignedOut();}
+function formatAdminTime(value){if(!value||typeof value.toDate!=='function')return 'Time pending';return value.toDate().toLocaleString();}
+async function loadAdminUsers(){
+  const box=document.getElementById('adminUsers'),historyBox=document.getElementById('adminHistory'),stats=document.getElementById('adminStats');
+  box.textContent='Loading users…';historyBox.textContent='Loading history…';stats.textContent='Loading stats…';
+  const user=firebase.auth().currentUser;
+  if(!user||user.uid!==adminUid||adminUid.startsWith('PASTE_')){box.textContent='Admin access required.';historyBox.textContent='Admin access required.';stats.textContent='Admin access required.';return;}
+  try{
+    const db=firebase.firestore();
+    const snap=await db.collection('users').orderBy('createdAt','desc').limit(200).get();
+    const now=Date.now();let onlineCount=0;
+    box.innerHTML='';
+    if(snap.empty){box.textContent='No registered users yet.';}
+    snap.forEach(doc=>{
+      const d=doc.data(),pr=d.progress||{},last=d.lastSeen;
+      const lastMs=last&&typeof last.toDate==='function'?last.toDate().getTime():0;
+      const online=!!lastMs&&(now-lastMs<=ONLINE_WINDOW_MS);
+      if(online)onlineCount++;
+      const el=document.createElement('div');el.className='admin-user';
+      el.textContent=(d.name||'Unnamed')+' · Mobile: '+(d.mobile||'not saved')+' · Status: '+(online?'ONLINE':'Offline')+' · Last seen: '+(lastMs?new Date(lastMs).toLocaleString():'Never')+' · Levels completed: '+(pr.completedLevels||[]).length+'/10';
+      box.appendChild(el);
+    });
+    stats.textContent='Registered users listed (max 200): '+snap.size+' · Currently online (heartbeat within 90 sec): '+onlineCount;
+  }catch(e){box.textContent='Could not load users. Check Firestore rules and createdAt field.';stats.textContent='Could not load stats.';console.error(e);}
+  try{
+    const historySnap=await firebase.firestore().collection('loginHistory').orderBy('timestamp','desc').limit(50).get();
+    historyBox.innerHTML='';
+    if(historySnap.empty){historyBox.textContent='No login/logout history yet. New events will appear after deployment.';return;}
+    historySnap.forEach(doc=>{const d=doc.data(),el=document.createElement('div');el.className='admin-user';el.textContent=(d.userName||'Unknown user')+' · '+String(d.event||'event').toUpperCase()+' · '+formatAdminTime(d.timestamp)+' · UID: '+(d.userId||'unknown');historyBox.appendChild(el);});
+  }catch(e){historyBox.textContent='Could not load login history. Check loginHistory Firestore rules.';console.error(e);}
+}
+if(firebaseConfigured()){try{firebase.initializeApp(firebaseConfig);firebaseReady=true;firebase.auth().onAuthStateChanged(async user=>{if(!user){if(heartbeatTimer){clearInterval(heartbeatTimer);heartbeatTimer=null;}presenceUid=null;premiumUnlocked=false;showSignedOut();return;}let profile={name:user.displayName||'Player'};try{const doc=await firebase.firestore().collection('users').doc(user.uid).get();if(doc.exists)profile={...profile,...doc.data()};}catch(e){console.warn(e);}showSignedIn(user,profile);startHeartbeat(user);await loadProgress(user);if(user.uid===adminUid&&!adminUid.startsWith('PASTE_'))loadAdminUsers();if(cloudSaveTimer)clearInterval(cloudSaveTimer);cloudSaveTimer=setInterval(saveProgress,8000);});}catch(e){firebaseReady=false;document.getElementById('setupWarning').hidden=false;showSignedOut();}}else{document.getElementById('setupWarning').hidden=false;showSignedOut();}
 window.addEventListener('beforeunload',()=>{if(firebaseReady&&firebase.auth().currentUser)saveProgress();});
 
 const levelPractice={
