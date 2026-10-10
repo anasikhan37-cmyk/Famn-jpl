@@ -133,7 +133,7 @@ async function loadAdminUsers(){
   if(!user||user.uid!==adminUid||adminUid.startsWith('PASTE_')){box.textContent='Admin access required.';historyBox.textContent='Admin access required.';stats.textContent='Admin access required.';return;}
   try{
     const db=firebase.firestore();
-    const snap=await db.collection('users').orderBy('createdAt','desc').limit(200).get();
+    const snap=await db.collection('users').orderBy('createdAt','desc').get();
     const now=Date.now();let onlineCount=0;
     box.innerHTML='';
     if(snap.empty){box.textContent='No registered users yet.';}
@@ -143,11 +143,11 @@ async function loadAdminUsers(){
       const online=!!lastMs&&(now-lastMs<=ONLINE_WINDOW_MS);
       if(online)onlineCount++;
       const el=document.createElement('div');el.className='admin-user';
-      el.textContent=(d.name||'Unnamed')+' · Mobile: '+(d.mobile||'not saved')+' · Status: '+(online?'ONLINE':'Offline')+' · Last seen: '+(lastMs?new Date(lastMs).toLocaleString():'Never')+' · Levels completed: '+(pr.completedLevels||[]).length+'/10';
+      el.textContent=(d.name||'Unnamed')+' · Mobile: '+(d.mobile||'not saved')+' · Status: '+(online?'ONLINE':'Offline')+' · Last seen: '+(lastMs?new Date(lastMs).toLocaleString():'Never')+' · Levels completed: '+(Array.isArray(pr.completedLevels)?pr.completedLevels.length:0)+'/10'+' · Current level: '+(pr.activeLevel||1)+' · Learning page: '+((Number.isInteger(pr.page)?pr.page:0)+1)+'/10'+' · Practice attempts: '+(Number.isInteger(pr.attempts)?pr.attempts:0);
       box.appendChild(el);
     });
-    stats.textContent='Registered users listed (max 200): '+snap.size+' · Currently online (heartbeat within 90 sec): '+onlineCount;
-  }catch(e){box.textContent='Could not load users. Check Firestore rules and createdAt field.';stats.textContent='Could not load stats.';console.error(e);}
+    stats.textContent='Total registered users: '+snap.size+' · Currently online (heartbeat within 90 sec): '+onlineCount;
+  }catch(e){box.textContent='Could not load users. Check Firestore rules and ensure users have a createdAt field.';stats.textContent='Could not load stats.';console.error(e);}
   try{
     const historySnap=await firebase.firestore().collection('loginHistory').orderBy('timestamp','desc').limit(50).get();
     historyBox.innerHTML='';
